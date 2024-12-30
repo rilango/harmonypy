@@ -29,6 +29,27 @@ dependencies = [
     "scipy",
 ]
 
+[project.optional-dependencies]
+cuda = [
+    "cupy-cuda11x>=12.0.0",  # For CUDA 11.x support
+    "cupy-cuda12x>=12.0.0",  # For CUDA 12.x support
+    "cudf-cu11>=23.12.*;python_version<'3.11'",  # CUDA 11.x
+    "cudf-cu12>=23.12.*;python_version<'3.11'",  # CUDA 12.x
+]
+cuda11 = [
+    "cupy-cuda11x>=12.0.0",
+    "cudf-cu11>=23.12.*;python_version<'3.11'",
+]
+cuda12 = [
+    "cupy-cuda12x>=12.0.0",
+    "cudf-cu12>=23.12.*;python_version<'3.11'",
+]
+distributed = [
+    "dask>=2023.3.0",
+    "distributed>=2023.3.0",
+    "dask-ml",
+]
+
 [project.urls]
 Homepage = "https://github.com/slowkow/harmonypy"
 

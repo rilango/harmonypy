@@ -19,21 +19,17 @@ import os
 import numpy
 import pandas as pd
 
-GPU = False
-try:
-    if os.environ.get('HARMONYPY_CPU', '0') == '1':
-        raise ModuleNotFoundError("HARMONYPY_CPU is set to 1")
+from .utils import is_gpu_available, is_distributed_supported
+from typing import Iterable
 
+if is_gpu_available():
     import cupy as _np
     from cudf.core.dtypes import CategoricalDtype as _Categorical
     from cuml.neighbors import NearestNeighbors as _NearestNeighbors
-    GPU = True
-except ModuleNotFoundError:
+else:
     import numpy as _np
     from pandas import Categorical as _Categorical
     from sklearn.neighbors import NearestNeighbors as _NearestNeighbors
-
-from typing import Iterable
 
 
 def compute_lisi(
@@ -63,17 +59,17 @@ def compute_lisi(
     [1]: Korsunsky et al. 2019 doi: 10.1038/s41592-019-0619-0
     """
 
-    if GPU == 1 and isinstance(X, numpy.ndarray):
+    if is_gpu_available() and isinstance(X, numpy.ndarray):
         X = _np.asarray(X)
 
     n_cells = metadata.shape[0]
     n_labels = len(label_colnames)
     # We need at least 3 * n_neigbhors to compute the perplexity
-    algo = 'auto' if GPU else 'kd_tree'
+    algo = 'auto' if is_gpu_available() else 'kd_tree'
     knn = _NearestNeighbors(n_neighbors = perplexity * 3, algorithm = algo).fit(X)
     distances, indices = knn.kneighbors(X)
     # Don't count yourself
-    if GPU:
+    if is_gpu_available():
         indices = indices.iloc[:,1:]
         distances = distances.iloc[:,1:]
     else:
@@ -108,7 +104,7 @@ def compute_simpson(
         betamin = -_np.inf
         betamax = _np.inf
         # Compute Hdiff
-        if GPU:
+        if is_gpu_available():
             P = _np.exp(_np.array(-distances.iloc[:,i] * beta))
         else:
             P = _np.exp(_np.array(-distances[:,i] * beta))
@@ -117,7 +113,7 @@ def compute_simpson(
             H = 0
             P = _np.zeros(distances.shape[0])
         else:
-            if GPU:
+            if is_gpu_available():
                 H = _np.log(P_sum) + beta * _np.sum(_np.array(distances.iloc[:,i]) * P) / P_sum
             else:
                 H = _np.log(P_sum) + beta * _np.sum(_np.array(distances[:,i]) * P) / P_sum
@@ -142,7 +138,7 @@ def compute_simpson(
                 else:
                     beta = (beta + betamin) / 2
             # Compute Hdiff
-            if GPU:
+            if is_gpu_available():
                 P = _np.exp(_np.array(-distances.iloc[:,i] * beta))
             else:
                 P = _np.exp(_np.array(-distances[:,i] * beta))
@@ -151,7 +147,7 @@ def compute_simpson(
                 H = 0
                 P = _np.zeros(distances.shape[0])
             else:
-                if GPU:
+                if is_gpu_available():
                     H = _np.log(P_sum) + beta * _np.sum(_np.array(distances.iloc[:,i]) * P) / P_sum
                 else:
                     H = _np.log(P_sum) + beta * _np.sum(_np.array(distances[:,i]) * P) / P_sum
@@ -161,7 +157,7 @@ def compute_simpson(
         if H == 0:
             simpson[i] = -1
         # Simpson's index
-        if GPU:
+        if is_gpu_available():
             labels_alias = labels.categories
             categories = labels_alias.unique().to_pandas()
         else:
@@ -169,7 +165,7 @@ def compute_simpson(
             labels_alias = labels
 
         for label_category in categories:
-            if GPU:
+            if is_gpu_available():
                 ix = indices.iloc[:,i]
             else:
                 ix = indices[:,i]

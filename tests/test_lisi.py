@@ -1,14 +1,11 @@
 import os
 import harmonypy as hm
+from harmonypy.utils import is_gpu_available
 
-GPU = False
-try:
-    if os.environ.get('HARMONYPY_CPU', '0') == '1':
-        raise ModuleNotFoundError("HARMONYPY_CPU is set to 1")
+if is_gpu_available():
     import cudf as pd
     import cupy as np
-    GPU = True
-except ModuleNotFoundError:
+else:
     import pandas as pd
     import numpy as np
 

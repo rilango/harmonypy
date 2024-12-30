@@ -4,18 +4,17 @@ import random
 import numpy
 
 from time import time
+from harmonypy.utils import is_gpu_available
 
-GPU = False
-try:
-    if os.environ.get('HARMONYPY_CPU', '0') == '1':
-        raise ModuleNotFoundError("HARMONYPY_CPU is set to 1")
+if is_gpu_available():
     import cudf as pd
     import cupy as np
     from cuml import KMeans
-    GPU = True
-except ModuleNotFoundError:
+    from cupy.testing import assert_array_equal as assert_equal
+else:
     import pandas as pd
     import numpy as np
+    from numpy.testing import assert_equal
 
 from scipy.stats import pearsonr
 from scipy.cluster.vq import kmeans2
@@ -42,7 +41,7 @@ def test_run_harmony():
 
     cors = []
     for i in range(res.shape[1]):
-        if GPU:
+        if is_gpu_available():
             cors.append(pearsonr(res.iloc[:, i].values.get(), harm.iloc[:, i].values.get()))
         else:
             cors.append(pearsonr(res.iloc[:, i].values, harm.iloc[:, i].values))
@@ -69,8 +68,8 @@ def test_random_seed():
 
     # Assert different values when random_state is None. Absolute differences
     # in multiple runs are usually > 2000
-    randomState1 = random.randint(0, 10000) if GPU else None
-    randomState2 = random.randint(0, 10000) if GPU else None
+    randomState1 = random.randint(0, 10000) if is_gpu_available() else None
+    randomState2 = random.randint(0, 10000) if is_gpu_available() else None
     assert np.abs(run(randomState1) - run(randomState2)).sum() > 1000
 
 
@@ -83,8 +82,8 @@ def test_cluster_fn():
 
     def cluster_fn(data, K):
 
-        if GPU:
-            kmeans = KMeans(n_clusters=K, init='k-means||')
+        if is_gpu_available():
+            kmeans = KMeans(n_clusters=K, init='scalable-k-means++', random_state=42)
             kmeans.fit(data)
             centroid = kmeans.cluster_centers_
             label = kmeans.labels_
@@ -101,9 +100,7 @@ def test_cluster_fn():
         return ho.Z_corr
 
     # Assert same results when random_state is set.
-    if GPU:
-        pass
-        # numpy.testing.assert_equal(run(cluster_fn).get(), run(cluster_fn).get())
+    if is_gpu_available():
+        np.testing.assert_allclose(run(cluster_fn), run(cluster_fn))
     else:
-        numpy.testing.assert_equal(run(cluster_fn), run(cluster_fn))
-
+        assert_equal(run(cluster_fn), run(cluster_fn))

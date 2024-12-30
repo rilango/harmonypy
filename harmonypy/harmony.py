@@ -19,21 +19,9 @@ import os
 import logging
 
 from functools import partial
+from .utils import is_gpu_available, is_distributed_supported
 import numpy
 import pandas as pd
-
-GPU = False
-try:
-    if os.environ.get('HARMONYPY_CPU', '0') == '1':
-        raise ModuleNotFoundError("HARMONYPY_CPU is set to 1")
-    import cudf as _pd
-    import cupy as _np
-    from cuml.cluster import KMeans as _KMeans
-    GPU = True
-except ModuleNotFoundError:
-    import pandas as _pd
-    import numpy as _np
-    from sklearn.cluster import KMeans as _KMeans
 
 # create logger
 logger = logging.getLogger('harmonypy')
@@ -44,11 +32,19 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
-# from IPython.core.debugger import set_trace
+if is_gpu_available():
+    import cudf as _pd
+    import cupy as _np
+    from cuml.cluster import KMeans as _KMeans
+else:
+    import pandas as _pd
+    import numpy as _np
+    from sklearn.cluster import KMeans as _KMeans
+
 
 def run_harmony(
-    data_mat: _np.ndarray,
-    meta_data: pd.DataFrame,
+    data_mat,
+    meta_data,
     vars_use,
     theta = None,
     lamb = None,
@@ -85,9 +81,9 @@ def run_harmony(
     # random_state = 0
     # cluster_fn = 'kmeans'. Also accepts a callable object with data, num_clusters parameters
 
-    if GPU == 1 and isinstance(data_mat, numpy.ndarray):
+    if is_gpu_available() and isinstance(data_mat, numpy.ndarray):
         data_mat = _np.asarray(data_mat)
-    if GPU == 1 and isinstance(meta_data, _pd.DataFrame):
+    if is_gpu_available() and isinstance(meta_data, _pd.DataFrame):
         meta_data = meta_data.to_pandas()
 
     N = meta_data.shape[0]
@@ -109,7 +105,7 @@ def run_harmony(
     phi = pd.get_dummies(meta_data[vars_use]).to_numpy().T
     phi_n = meta_data[vars_use].describe().loc['unique'].to_numpy().astype(int)
 
-    if GPU:
+    if is_gpu_available():
         phi = _np.asarray(phi)
 
     if theta is None:
@@ -140,7 +136,7 @@ def run_harmony(
     if tau > 0:
         theta = theta * (1 - _np.exp(-(N_b / (nclust * tau)) ** 2))
 
-    if GPU:
+    if is_gpu_available():
         index = 0
         value = 0
         lamb_mat = _np.empty(len(lamb) + 1, dtype=lamb.dtype)
@@ -169,19 +165,34 @@ class Harmony(object):
             epsilon_kmeans, epsilon_harmony, K, block_size,
             lamb, verbose, random_state=None, cluster_fn='kmeans'
     ):
-        if GPU:
-            if isinstance(Z, _pd.DataFrame):
-                self.Z_corr = Z.to_cupy()
-                self.Z_orig = Z.to_cupy()
-            else:
-                self.Z_corr = _np.asarray(Z)
-                self.Z_orig = _np.asarray(Z)
+        self.is_distributed = False
+        # Dask may be available but inputs are not dask arrays.
+        if is_distributed_supported():
+            import dask.array as da
+            self.is_distributed = isinstance(Z, da.Array)
+
+        if not self.is_distributed:
+            if is_gpu_available():
+                if isinstance(Z, _pd.DataFrame):
+                    self.Z_corr = Z.to_cupy()
+                    self.Z_orig = Z.to_cupy()
+                else:
+                    self.Z_corr = _np.asarray(Z)
+                    self.Z_orig = _np.asarray(Z)
+            elif not is_distributed_supported():
+                self.Z_corr = _np.array(Z)
+                self.Z_orig = _np.array(Z)
+
         else:
-            self.Z_corr = _np.array(Z)
-            self.Z_orig = _np.array(Z)
+            # Z is a dask array
+            self.Z_corr = Z
+            self.Z_orig = Z
 
         self.Z_cos = self.Z_orig / self.Z_orig.max(axis=0)
-        self.Z_cos = self.Z_cos / _np.linalg.norm(self.Z_cos, ord=2, axis=0)
+        if self.is_distributed:
+            self.Z_cos = self.Z_cos / da.linalg.norm(self.Z_cos, ord=2, axis=0)
+        else:
+            self.Z_cos = self.Z_cos / _np.linalg.norm(self.Z_cos, ord=2, axis=0)
 
         self.Phi             = Phi
         self.Phi_moe         = Phi_moe
@@ -212,7 +223,9 @@ class Harmony(object):
 
         self.allocate_buffers()
         if cluster_fn == 'kmeans':
-            cluster_fn = partial(Harmony._cluster_kmeans, random_state=random_state)
+            cluster_fn = partial(Harmony._cluster_kmeans,
+                                 random_state=random_state,
+                                 is_distributed=self.is_distributed)
         self.init_cluster(cluster_fn)
         self.harmonize(self.max_iter_harmony, self.verbose)
 
@@ -228,14 +241,22 @@ class Harmony(object):
         self.Phi_Rk      = _np.zeros((self.B + 1, self.N))
 
     @staticmethod
-    def _cluster_kmeans(data, K, random_state):
+    def _cluster_kmeans(data, K, random_state, is_distributed=False):
         # Start with cluster centroids
         logger.info("Computing initial centroids with sklearn.KMeans...")
-        model = _KMeans(n_clusters=K, init='k-means++',
-                       n_init=10, max_iter=25, random_state=random_state)
+        if is_distributed:
+            # from dask_ml.cluster import KMeans as dask_KMeans
+            # model = dask_KMeans(n_clusters=K, init='k-means++',
+            #                 n_init=10, max_iter=25, random_state=random_state)
+            from cuml.dask.cluster import KMeans as dask_KMeans
+            model = dask_KMeans(n_clusters=K, init='scalable-k-means++',
+                                n_init=10, max_iter=25, random_state=random_state)
+        else:
+            model = _KMeans(n_clusters=K, init='k-means++',
+                            n_init=10, max_iter=25, random_state=random_state)
         model.fit(data)
         km_centroids, km_labels = model.cluster_centers_, model.labels_
-        logger.info("sklearn.KMeans initialization complete.")
+        logger.info("KMeans initialization complete.")
         return km_centroids
 
     def init_cluster(self, cluster_fn):

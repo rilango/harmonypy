@@ -1,10 +1,10 @@
-import os
 import time
 import pytest
 import logging
 
 from time import time
 from multiprocessing import Process
+from harmonypy.utils import is_gpu_available, is_distributed_supported
 
 
 def run_test_in_process(test_func, *args):
@@ -22,11 +22,10 @@ def run_test_in_process(test_func, *args):
 
 
 def run_it(cpu):
-    os.environ['HARMONYPY_CPU'] = str(cpu)
-    if cpu == 1:
-        import pandas as pd
-    else:
+    if is_gpu_available():
         import cudf as pd
+    else:
+        import pandas as pd
     import harmonypy as hm
 
     meta_data = pd.read_csv("data/pbmc_3500_meta.tsv.gz", sep="\t")
@@ -38,7 +37,7 @@ def run_it(cpu):
     logging.info("{:.2f} seconds elapsed".format(end - start))
 
 
-@pytest.mark.skip(reason='Not a functional test')
+# @pytest.mark.skip(reason='Not a functional test')
 @pytest.mark.parametrize("test_input", [1, 0])
 def test_in_separate_processes(test_input):
     run_test_in_process(run_it, test_input)
