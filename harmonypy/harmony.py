@@ -243,7 +243,7 @@ class Harmony(object):
     @staticmethod
     def _cluster_kmeans(data, K, random_state, is_distributed=False):
         # Start with cluster centroids
-        logger.info("Computing initial centroids with sklearn.KMeans...")
+        logger.info("Computing initial centroids with KMeans...")
         if is_distributed:
             # from dask_ml.cluster import KMeans as dask_KMeans
             # model = dask_KMeans(n_clusters=K, init='k-means++',
@@ -264,29 +264,33 @@ class Harmony(object):
         # (1) Normalize
         self.Y = self.Y / _np.linalg.norm(self.Y, ord=2, axis=0)
         # (2) Assign cluster probabilities
-        self.dist_mat = 2 * (1 - _np.dot(self.Y.T, self.Z_cos))
+        import dask.array as da
+        self.dist_mat = 2 * (1 - da.dot(self.Y.T, self.Z_cos))
         self.R = -self.dist_mat
         self.R = self.R / self.sigma[:,None]
         self.R -= _np.max(self.R, axis = 0)
-        self.R = _np.exp(self.R)
-        self.R = self.R / _np.sum(self.R, axis = 0)
+        self.R = da.exp(self.R)
+        self.R = self.R / da.sum(self.R, axis = 0)
         # (3) Batch diversity statistics
-        self.E = _np.outer(_np.sum(self.R, axis=1), self.Pr_b)
-        self.O = _np.inner(self.R , self.Phi)
+        self.E = da.outer(da.sum(self.R, axis=1), self.Pr_b)
+        # self.O = _np.inner(self.R , self.Phi)
+        self.O = da.tensordot(self.R , self.Phi, axes=(-1, -1))
         self.compute_objective()
         # Save results
         self.objective_harmony.append(self.objective_kmeans[-1])
 
     def compute_objective(self):
-        kmeans_error = _np.sum(_np.multiply(self.R, self.dist_mat))
+        import dask.array as da
+        kmeans_error = da.sum(da.multiply(self.R, self.dist_mat))
         # Entropy
-        _entropy = _np.sum(safe_entropy(self.R) * self.sigma[:,_np.newaxis])
+        _entropy = da.sum(safe_entropy(self.R) * self.sigma[:,_np.newaxis])
         # Cross Entropy
         x = (self.R * self.sigma[:,_np.newaxis])
         y = _np.tile(self.theta[:,_np.newaxis], self.K).T
-        z = _np.log((self.O + 1) / (self.E + 1))
-        w = _np.dot(y * z, self.Phi)
-        _cross_entropy = _np.sum(x * w)
+        z = da.log((self.O + 1) / (self.E + 1))
+        # w = _np.dot(y * z, self.Phi)
+        w = da.dot(da.multiply(y, z), self.Phi)
+        _cross_entropy = da.sum(x * w)
         # Save results
         self.objective_kmeans.append(kmeans_error + _entropy + _cross_entropy)
         self.objective_kmeans_dist.append(kmeans_error)
@@ -323,14 +327,15 @@ class Harmony(object):
         # Z_cos has changed
         # R is assumed to not have changed
         # Update Y to match new integrated data
-        self.dist_mat = 2 * (1 - _np.dot(self.Y.T, self.Z_cos))
+        import dask.array as da
+        self.dist_mat = 2 * (1 - da.dot(self.Y.T, self.Z_cos))
         for i in range(self.max_iter_kmeans):
             # print("kmeans {}".format(i))
             # STEP 1: Update Y
-            self.Y = _np.dot(self.Z_cos, self.R.T)
-            self.Y = self.Y / _np.linalg.norm(self.Y, ord=2, axis=0)
+            self.Y = da.dot(self.Z_cos, self.R.T)
+            self.Y = self.Y / da.linalg.norm(self.Y, ord=2, axis=0)
             # STEP 2: Update dist_mat
-            self.dist_mat = 2 * (1 - _np.dot(self.Y.T, self.Z_cos))
+            self.dist_mat = 2 * (1 - da.dot(self.Y.T, self.Z_cos))
             # STEP 3: Update R
             self.update_R()
             # STEP 4: Check for convergence
@@ -344,32 +349,53 @@ class Harmony(object):
         return 0
 
     def update_R(self):
+        import dask.array as da
+
+        def update_block(x, idx, new_values):
+            x[:,idx] = new_values
+            return x
+
         self._scale_dist = -self.dist_mat
         self._scale_dist = self._scale_dist / self.sigma[:,None]
-        self._scale_dist -= _np.max(self._scale_dist, axis=0)
-        self._scale_dist = _np.exp(self._scale_dist)
+        self._scale_dist -= da.max(self._scale_dist, axis=0)
+        self._scale_dist = da.exp(self._scale_dist)
         # Update cells in blocks
         update_order = _np.arange(self.N)
         _np.random.shuffle(update_order)
         n_blocks = _np.ceil(1 / self.block_size).astype(int)
         blocks = _np.array_split(update_order, int(n_blocks))
+        def update_block(x, idx, new_values):
+            x[:,idx] = new_values
+            return x
+
         for b in blocks:
             # STEP 1: Remove cells
-            self.E -= _np.outer(_np.sum(self.R[:,b], axis=1), self.Pr_b)
-            self.O -= _np.dot(self.R[:,b], self.Phi[:,b].T)
+            self.E -= da.outer(da.sum(self.R[:,b], axis=1), self.Pr_b)
+            self.O -= da.dot(self.R[:,b], self.Phi[:,b].T)
             # STEP 2: Recompute R for removed cells
-            self.R[:,b] = self._scale_dist[:,b]
-            self.R[:,b] = _np.multiply(
-                self.R[:,b],
-                _np.dot(
-                    _np.power((self.E + 1) / (self.O + 1), self.theta),
-                    self.Phi[:,b]
-                )
+            R_temp = self._scale_dist[:,b]
+
+            # Calculate the multiplicative factor
+            power_term = da.power((self.E + 1) / (self.O + 1), self.theta)
+            mult_factor = da.dot(power_term, self.Phi[:,b])
+
+            # Update R with proper broadcasting
+            R_temp = da.multiply(R_temp, mult_factor)
+
+            # Normalize along axis 0
+            R_norm = da.linalg.norm(R_temp, ord=1, axis=0)
+            R_temp = R_temp / R_norm[None,:]
+
+            # Assign back to self.R with proper indexing
+            self.R = self.R.map_blocks(
+                lambda x: update_block(x, b, R_temp.compute()),
+                dtype=self.R.dtype
             )
-            self.R[:,b] = self.R[:,b] / _np.linalg.norm(self.R[:,b], ord=1, axis=0)
+
             # STEP 3: Put cells back
-            self.E += _np.outer(_np.sum(self.R[:,b], axis=1), self.Pr_b)
-            self.O += _np.dot(self.R[:,b], self.Phi[:,b].T)
+            self.E += da.outer(da.sum(self.R[:,b], axis=1), self.Pr_b)
+            self.O += da.dot(self.R[:,b], self.Phi[:,b].T)
+
         return 0
 
     def check_convergence(self, i_type):
@@ -395,18 +421,20 @@ class Harmony(object):
 
 
 def safe_entropy(x: _np.array):
-    y = _np.multiply(x, _np.log(x))
-    y[~_np.isfinite(y)] = 0.0
+    import dask.array as da
+    y = da.multiply(x, da.log(x))
+    y[~da.isfinite(y)] = 0.0
     return y
 
 def moe_correct_ridge(Z_orig, Z_cos, Z_corr, R, W, K, Phi_Rk, Phi_moe, lamb):
+    import dask.array as da
     Z_corr = Z_orig.copy()
     for i in range(K):
-        Phi_Rk = _np.multiply(Phi_moe, R[i,:])
-        x = _np.dot(Phi_Rk, Phi_moe.T) + lamb
-        W = _np.dot(_np.dot(_np.linalg.inv(x), Phi_Rk), Z_orig.T)
+        Phi_Rk = da.multiply(Phi_moe, R[i,:])
+        x = da.dot(Phi_Rk, Phi_moe.T) + lamb
+        W = da.dot(da.dot(da.linalg.inv(x), Phi_Rk), Z_orig.T)
         W[0,:] = 0 # do not remove the intercept
-        Z_corr -= _np.dot(W.T, Phi_Rk)
-    Z_cos = Z_corr / _np.linalg.norm(Z_corr, ord=2, axis=0)
+        Z_corr -= da.dot(W.T, Phi_Rk)
+    Z_cos = Z_corr / da.linalg.norm(Z_corr, ord=2, axis=0)
     return Z_cos, Z_corr, W, Phi_Rk
 

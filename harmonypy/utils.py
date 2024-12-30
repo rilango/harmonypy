@@ -97,6 +97,7 @@ def prep_distributed_inputs(input_files: Set[str],  vars_use: List[str]):
                 sub_data = csr_matrix(
                     (sub_data, sub_indices, sub_indptrs),
                     shape=(batch_end - batch_start, total_cols))
+                sub_data = sub_data.todense()
             elif attrs['encoding-type'] == 'array':
                 sub_data = h5f["X"][batch_start:batch_end]
             else:
@@ -111,7 +112,7 @@ def prep_distributed_inputs(input_files: Set[str],  vars_use: List[str]):
     for input_file, batch_col in list(zip(input_files, vars_use)):
         with h5py.File(input_file, 'r') as h5f:
             assert batch_col in h5f[f'obs']
-
+            cnt_genes = len(h5f[H5AD_GENES])
             cnt_cells = len(h5f[H5AD_INDPRT]) - 1
             # Compute metadata for computing phi in harmony
             # This involves reading categorical data from h5. Move to aseparate
@@ -126,7 +127,7 @@ def prep_distributed_inputs(input_files: Set[str],  vars_use: List[str]):
 
             if is_gpu_available():
                 dtype = _pd.CategoricalDtype(categories=batch_names, ordered=ordered)
-                meta_series = _pd.Series(codes, dtype=dtype)
+                meta_series = _pd.Series.from_categorical(dtype, codes[:])
                 metadata = _pd.DataFrame({batch_col: meta_series})
             else:
                 raise NotImplementedError("Pandas support is not yet available")
@@ -136,12 +137,8 @@ def prep_distributed_inputs(input_files: Set[str],  vars_use: List[str]):
         for batch_start in range(0, cnt_cells, BATCH_SIZE):
             actual_batch_size = min(BATCH_SIZE, cnt_cells - batch_start)
             dls.append(da.from_delayed(
-                (_read_batch)
-                (input_file,
-                batch_start,
-                batch_start + actual_batch_size,
-                cnt_cells),
+                (_read_batch) (input_file, batch_start, batch_start + actual_batch_size, cnt_genes),
                 dtype=_np.float32,
-                shape=(actual_batch_size, cnt_cells)))
+                shape=(actual_batch_size, cnt_genes)))
 
     return da.concatenate(dls), dd.concat(dfs_metadata)
