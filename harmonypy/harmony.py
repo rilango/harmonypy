@@ -22,6 +22,7 @@ from functools import partial
 from .utils import is_gpu_available, is_distributed_supported
 import numpy
 import pandas as pd
+import dask.array as da
 
 # create logger
 logger = logging.getLogger('harmonypy')
@@ -168,7 +169,6 @@ class Harmony(object):
         self.is_distributed = False
         # Dask may be available but inputs are not dask arrays.
         if is_distributed_supported():
-            import dask.array as da
             self.is_distributed = isinstance(Z, da.Array)
 
         if not self.is_distributed:
@@ -182,11 +182,11 @@ class Harmony(object):
             elif not is_distributed_supported():
                 self.Z_corr = _np.array(Z)
                 self.Z_orig = _np.array(Z)
-
         else:
             # Z is a dask array
             self.Z_corr = Z
             self.Z_orig = Z
+            logger.info("Dask array detected. Harmony will run in distributed mode.")
 
         self.Z_cos = self.Z_orig / self.Z_orig.max(axis=0)
         if self.is_distributed:
@@ -264,7 +264,6 @@ class Harmony(object):
         # (1) Normalize
         self.Y = self.Y / _np.linalg.norm(self.Y, ord=2, axis=0)
         # (2) Assign cluster probabilities
-        import dask.array as da
         self.dist_mat = 2 * (1 - da.dot(self.Y.T, self.Z_cos))
         self.R = -self.dist_mat
         self.R = self.R / self.sigma[:,None]
@@ -280,7 +279,6 @@ class Harmony(object):
         self.objective_harmony.append(self.objective_kmeans[-1])
 
     def compute_objective(self):
-        import dask.array as da
         kmeans_error = da.sum(da.multiply(self.R, self.dist_mat))
         # Entropy
         _entropy = da.sum(safe_entropy(self.R) * self.sigma[:,_np.newaxis])
@@ -310,6 +308,17 @@ class Harmony(object):
                 self.Z_orig, self.Z_cos, self.Z_corr, self.R, self.W, self.K,
                 self.Phi_Rk, self.Phi_moe, self.lamb
             )
+
+            # self.Z_cos = self.Z_cos.compute()
+            # self.Z_corr = self.Z_corr.compute()
+            # self.W = self.W.compute()
+            # self.Phi_Rk = self.Phi_Rk.compute()
+            # self.Z_orig = self.Z_orig.compute()
+            # self.R = self.R.compute()
+            # self.K = self.K.compute()
+            # self.Phi_moe = self.Phi_moe.compute()
+            # self.lamb = self.lamb.compute()
+
             # STEP 3: Check for convergence
             converged = self.check_convergence(1)
             if converged:
@@ -327,7 +336,6 @@ class Harmony(object):
         # Z_cos has changed
         # R is assumed to not have changed
         # Update Y to match new integrated data
-        import dask.array as da
         self.dist_mat = 2 * (1 - da.dot(self.Y.T, self.Z_cos))
         for i in range(self.max_iter_kmeans):
             # print("kmeans {}".format(i))
@@ -349,8 +357,6 @@ class Harmony(object):
         return 0
 
     def update_R(self):
-        import dask.array as da
-
         def update_block(x, idx, new_values):
             x[:,idx] = new_values
             return x
@@ -364,11 +370,8 @@ class Harmony(object):
         _np.random.shuffle(update_order)
         n_blocks = _np.ceil(1 / self.block_size).astype(int)
         blocks = _np.array_split(update_order, int(n_blocks))
-        def update_block(x, idx, new_values):
-            x[:,idx] = new_values
-            return x
 
-        for b in blocks:
+        for i, b in enumerate(blocks):
             # STEP 1: Remove cells
             self.E -= da.outer(da.sum(self.R[:,b], axis=1), self.Pr_b)
             self.O -= da.dot(self.R[:,b], self.Phi[:,b].T)
@@ -389,8 +392,12 @@ class Harmony(object):
             # Assign back to self.R with proper indexing
             self.R = self.R.map_blocks(
                 lambda x: update_block(x, b, R_temp.compute()),
-                dtype=self.R.dtype
+                dtype=self.R.dtype,
+                name=f'update_r-R_update_block-{i}-{id(self.R)}'
             )
+            r_chunks = self.R.chunks
+            self.R = self.R.compute()
+            self.R = da.from_array(self.R, chunks=r_chunks)
 
             # STEP 3: Put cells back
             self.E += da.outer(da.sum(self.R[:,b], axis=1), self.Pr_b)
@@ -421,13 +428,11 @@ class Harmony(object):
 
 
 def safe_entropy(x: _np.array):
-    import dask.array as da
     y = da.multiply(x, da.log(x))
     y[~da.isfinite(y)] = 0.0
     return y
 
 def moe_correct_ridge(Z_orig, Z_cos, Z_corr, R, W, K, Phi_Rk, Phi_moe, lamb):
-    import dask.array as da
     Z_corr = Z_orig.copy()
     for i in range(K):
         Phi_Rk = da.multiply(Phi_moe, R[i,:])
