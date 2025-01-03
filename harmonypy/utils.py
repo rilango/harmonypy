@@ -80,7 +80,6 @@ def prep_distributed_inputs(input_files: Set[str],  vars_use: List[str]):
             encoding = None
             if 'encoding-type' in attrs:
                 encoding = attrs['encoding-type']
-
             if encoding == 'csr_matrix':
                 indptrs = h5f[H5AD_INDPRT]
                 start_ptr = indptrs[batch_start]
@@ -133,12 +132,12 @@ def prep_distributed_inputs(input_files: Set[str],  vars_use: List[str]):
                 raise NotImplementedError("Pandas support is not yet available")
             dfs_metadata.append(metadata)
 
-        BATCH_SIZE
         for batch_start in range(0, cnt_cells, BATCH_SIZE):
             actual_batch_size = min(BATCH_SIZE, cnt_cells - batch_start)
             dls.append(da.from_delayed(
                 (_read_batch) (input_file, batch_start, batch_start + actual_batch_size, cnt_genes),
                 dtype=_np.float32,
+                meta=_np.ndarray((0,), dtype=float),
                 shape=(actual_batch_size, cnt_genes)))
 
     return da.concatenate(dls), dd.concat(dfs_metadata)
